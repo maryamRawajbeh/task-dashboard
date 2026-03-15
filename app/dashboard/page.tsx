@@ -80,35 +80,36 @@ export default function DashboardPage() {
   function openEdit(task: Task) { setEditTask(task); setForm({ title: task.title, description: task.description, assignee: task.assignee, priority: task.priority, due: task.due, status: task.status }); setFormError(""); setShowModal(true) }
 
   // ── Save ────────────────────────────────────────────────────────
+  async function refreshTasks() {
+    const res = await fetch("/api/tasks")
+    const data: Task[] = await res.json()
+    setTasks(data)
+  }
+
   async function handleSave(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
     if (!form.title.trim() || !form.assignee.trim() || !form.due) { setFormError("Please fill in all required fields."); return }
     setSaving(true)
     if (editTask) {
-      // PUT /api/tasks/:id
-      const res = await fetch(`/api/tasks/${editTask.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) })
-      if (res.ok) { const updated: Task = await res.json(); setTasks((prev) => prev.map((t) => t.id === updated.id ? updated : t)) }
+      await fetch(`/api/tasks/${editTask.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) })
     } else {
-      // POST /api/tasks
-      const res = await fetch("/api/tasks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) })
-      if (res.ok) { const created: Task = await res.json(); setTasks((prev) => [created, ...prev]) }
+      await fetch("/api/tasks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) })
     }
+    await refreshTasks()
     setSaving(false); setShowModal(false)
   }
 
   // ── Delete ──────────────────────────────────────────────────────
   async function handleDelete(id: number) {
-    // DELETE /api/tasks/:id
     await fetch(`/api/tasks/${id}`, { method: "DELETE" })
-    setTasks((prev) => prev.filter((t) => t.id !== id))
+    await refreshTasks()
     setDeleteId(null)
   }
 
   // ── Quick status ────────────────────────────────────────────────
   async function handleStatusChange(task: Task, newStatus: TaskStatus) {
-    // PUT /api/tasks/:id
-    const res = await fetch(`/api/tasks/${task.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: newStatus }) })
-    if (res.ok) { const updated: Task = await res.json(); setTasks((prev) => prev.map((t) => t.id === updated.id ? updated : t)) }
+    await fetch(`/api/tasks/${task.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: newStatus }) })
+    await refreshTasks()
   }
 
   const hasFilters = search || filterStatus !== "all" || filterPriority !== "all" || filterDue

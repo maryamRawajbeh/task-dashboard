@@ -1,7 +1,14 @@
 import { Task } from "@/types"
 
-// Shared in-memory store — swap with a real DB (Prisma, Supabase, etc.) in production
-export let tasks: Task[] = [
+// نحط البيانات على global عشان تبقى محفوظة بين الـ requests في Next.js
+declare global {
+  // eslint-disable-next-line no-var
+  var __tasks: Task[] | undefined
+  // eslint-disable-next-line no-var
+  var __nextId: number | undefined
+}
+
+const initialTasks: Task[] = [
   { id: 1,  title: "Design system architecture",    description: "Plan the overall system structure and component hierarchy.", status: "completed",  priority: "high",   due: "2025-03-01", assignee: "Ahmed" },
   { id: 2,  title: "Implement authentication flow", description: "Set up NextAuth with JWT and protected routes.",               status: "completed",  priority: "high",   due: "2025-03-05", assignee: "Sara"  },
   { id: 3,  title: "Build dashboard UI",            description: "Create the main dashboard with stats, charts, and task table.", status: "completed",  priority: "medium", due: "2025-03-08", assignee: "Ahmed" },
@@ -15,23 +22,34 @@ export let tasks: Task[] = [
   { id: 11, title: "Mobile responsiveness",         description: "Ensure all pages work correctly on mobile devices.",          status: "pending",     priority: "medium", due: "2026-04-05", assignee: "Ahmed" },
   { id: 12, title: "Dark mode support",             description: "Add dark/light theme toggle across the application.",         status: "pending",     priority: "low",    due: "2026-04-10", assignee: "Sara"  },
 ]
-export let nextId = 13
 
-export function getAllTasks()              { return tasks }
-export function getTaskById(id: number)   { return tasks.find((t) => t.id === id) ?? null }
+// استخدم global عشان يبقى نفس الـ instance بين كل الـ requests
+if (!global.__tasks)  global.__tasks  = initialTasks
+if (!global.__nextId) global.__nextId = 13
+
+export function getAllTasks(): Task[] {
+  return global.__tasks!
+}
+
+export function getTaskById(id: number): Task | null {
+  return global.__tasks!.find((t) => t.id === id) ?? null
+}
+
 export function createTask(data: Omit<Task, "id">): Task {
-  const task: Task = { id: nextId++, ...data }
-  tasks = [task, ...tasks]
+  const task: Task = { id: global.__nextId!++, ...data }
+  global.__tasks = [task, ...global.__tasks!]
   return task
 }
+
 export function updateTask(id: number, data: Partial<Task>): Task | null {
-  const i = tasks.findIndex((t) => t.id === id)
+  const i = global.__tasks!.findIndex((t) => t.id === id)
   if (i === -1) return null
-  tasks[i] = { ...tasks[i], ...data, id }
-  return tasks[i]
+  global.__tasks![i] = { ...global.__tasks![i], ...data, id }
+  return global.__tasks![i]
 }
+
 export function deleteTask(id: number): boolean {
-  const exists = tasks.some((t) => t.id === id)
-  tasks = tasks.filter((t) => t.id !== id)
+  const exists = global.__tasks!.some((t) => t.id === id)
+  global.__tasks = global.__tasks!.filter((t) => t.id !== id)
   return exists
 }

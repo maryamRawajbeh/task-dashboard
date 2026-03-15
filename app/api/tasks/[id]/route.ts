@@ -5,10 +5,11 @@ import { Task } from "@/types"
 // PUT /api/tasks/:id — update a task
 export async function PUT(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ): Promise<NextResponse<Task | { error: string }>> {
   try {
-    const id = parseInt(params.id)
+    const { id: rawId } = await params
+    const id = parseInt(rawId)
     if (isNaN(id)) return NextResponse.json({ error: "Invalid task ID" }, { status: 400 })
     if (!getTaskById(id)) return NextResponse.json({ error: "Task not found" }, { status: 404 })
     const body = await req.json()
@@ -22,9 +23,10 @@ export async function PUT(
 // DELETE /api/tasks/:id — delete a task
 export async function DELETE(
   _req: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ): Promise<NextResponse<{ success: boolean } | { error: string }>> {
-  const id = parseInt(params.id)
+  const { id: rawId } = await params
+  const id = parseInt(rawId)
   if (isNaN(id)) return NextResponse.json({ error: "Invalid task ID" }, { status: 400 })
   const deleted = deleteTask(id)
   if (!deleted) return NextResponse.json({ error: "Task not found" }, { status: 404 })
