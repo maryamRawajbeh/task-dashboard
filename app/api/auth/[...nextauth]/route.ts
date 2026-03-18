@@ -1,5 +1,6 @@
 import NextAuth, { NextAuthOptions } from "next-auth"
 import CredentialsProvider from "next-auth/providers/credentials"
+import { UserRole } from "@/types"
 
 export const authOptions: NextAuthOptions = {
   providers: [
@@ -10,9 +11,31 @@ export const authOptions: NextAuthOptions = {
         password: { label: "Password", type: "password" },
       },
       async authorize(credentials) {
+        // Test users with different roles
         const users = [
-          { id: "1", name: "Ahmed Al-Rashid", email: "admin@taskflow.com", password: "admin123", role: "Admin" },
-          { id: "2", name: "Sara Hassan", email: "sara@taskflow.com", password: "sara123", role: "Manager" },
+          // Admin user - Has full access
+          { 
+            id: "1", 
+            name: "Admin", 
+            email: "admin@example.com", 
+            password: "admin123", 
+            role: "Admin" as UserRole 
+          },
+          // Regular users - Can view only assigned tasks
+          { 
+            id: "2", 
+            name: "Ahmed", 
+            email: "ahmed@example.com", 
+            password: "ahmed123", 
+            role: "User" as UserRole 
+          },
+          { 
+            id: "3", 
+            name: "Sara", 
+            email: "sara@example.com", 
+            password: "sara123", 
+            role: "User" as UserRole 
+          },
         ]
         const user = users.find(
           (u) => u.email === credentials?.email && u.password === credentials?.password

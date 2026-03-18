@@ -1,8 +1,11 @@
 "use client"
 import { useEffect, useState, CSSProperties, FormEvent } from "react"
 import { useSession, signOut } from "next-auth/react"
+import Link from "next/link"
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from "recharts"
-import { Task, TaskStats, TaskStatus, TaskPriority } from "@/types"
+import { Task, TaskStats, TaskStatus, TaskPriority, UserRole, ROLE_PERMISSIONS } from "@/types"
+import { canEditTask, canDeleteTask, canUpdateTaskStatus } from "@/lib/rbac"
+import { AVAILABLE_USERS } from "@/lib/users"
 
 const STATUS_COLOR: Record<string, string> = { completed: "#22c55e", pending: "#f59e0b", "in-progress": "#38bdf8" }
 const PRIORITY_COLOR: Record<string, string> = { high: "#ef4444", medium: "#f59e0b", low: "#22c55e" }
@@ -13,6 +16,7 @@ export default function DashboardPage() {
   const { data: session } = useSession()
   const [tasks, setTasks] = useState<Task[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
 
   // Modal
   const [showModal, setShowModal] = useState(false)
@@ -33,11 +37,40 @@ export default function DashboardPage() {
   // Delete confirm
   const [deleteId, setDeleteId] = useState<number | null>(null)
 
+  const userRole = (session?.user?.role as UserRole) || "User"
+  const permissions = ROLE_PERMISSIONS[userRole]
+
   useEffect(() => {
     fetch("/api/tasks")
       .then((r) => r.json())
-      .then((data: Task[]) => { setTasks(data); setLoading(false) })
+      .then((data) => {
+        if (Array.isArray(data)) {
+          setTasks(data)
+          setLoading(false)
+        } else if (data.error) {
+          setError(data.error)
+          setLoading(false)
+        }
+      })
   }, [])
+
+  // ── Can user edit/delete task? ───────────────────────────────
+  function canUserEditTask(task: Task): boolean {
+    return canEditTask(userRole, task.createdBy, session?.user?.email || "", task.assigneeEmail)
+  }
+
+  function canUserDeleteTask(task: Task): boolean {
+    return canDeleteTask(userRole, task.createdBy, session?.user?.email || "")
+  }
+
+  function canUserUpdateStatus(task: Task): boolean {
+    const allowed = canUpdateTaskStatus(userRole)
+    // User can only update status if they're the assignee
+    if (userRole === "User" && task.assigneeEmail !== session?.user?.email) {
+      return false
+    }
+    return allowed
+  }
 
   // ── Filtered tasks ──────────────────────────────────────────────
   const filtered = tasks.filter((t) => {
@@ -48,10 +81,17 @@ export default function DashboardPage() {
     return matchSearch && matchStatus && matchPriority && matchDue
   })
 
+  // Group tasks by assignee for admin view
+  const groupedTasks = userRole === "Admin" ? filtered.reduce((acc, task) => {
+    if (!acc[task.assignee]) acc[task.assignee] = []
+    acc[task.assignee].push(task)
+    return acc
+  }, {} as Record<string, Task[]>) : null
+
   // ── Pagination ──────────────────────────────────────────────────
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+  const totalPages = userRole === "Admin" ? 1 : Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
   const safePage = Math.min(page, totalPages)
-  const paginated = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE)
+  const paginated = userRole === "Admin" ? filtered : filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE)
 
   // reset to page 1 when filters change
   useEffect(() => { setPage(1) }, [search, filterStatus, filterPriority, filterDue])
@@ -76,8 +116,34 @@ export default function DashboardPage() {
   ]
 
   // ── Modal helpers ───────────────────────────────────────────────
-  function openCreate() { setEditTask(null); setForm(EMPTY_FORM); setFormError(""); setShowModal(true) }
-  function openEdit(task: Task) { setEditTask(task); setForm({ title: task.title, description: task.description, assignee: task.assignee, priority: task.priority, due: task.due, status: task.status }); setFormError(""); setShowModal(true) }
+  function openCreate() { 
+    if (!permissions.createTask) {
+      setFormError("You don't have permission to create tasks")
+      return
+    }
+    setEditTask(null)
+    setForm(EMPTY_FORM)
+    setFormError("")
+    setShowModal(true)
+  }
+
+  function openEdit(task: Task) { 
+    // User can only edit status of their assigned tasks
+    if (userRole === "User") {
+      if (task.assigneeEmail !== session?.user?.email) {
+        setFormError("You can only edit your assigned tasks")
+        return
+      }
+    } else if (!canUserEditTask(task)) {
+      // Admin can edit any task
+      setFormError("You don't have permission to edit this task")
+      return
+    }
+    setEditTask(task)
+    setForm({ title: task.title, description: task.description, assignee: task.assignee, priority: task.priority, due: task.due, status: task.status })
+    setFormError("")
+    setShowModal(true)
+  }
 
   // ── Save ────────────────────────────────────────────────────────
   async function refreshTasks() {
@@ -88,28 +154,83 @@ export default function DashboardPage() {
 
   async function handleSave(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
-    if (!form.title.trim() || !form.assignee.trim() || !form.due) { setFormError("Please fill in all required fields."); return }
-    setSaving(true)
-    if (editTask) {
-      await fetch(`/api/tasks/${editTask.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) })
-    } else {
-      await fetch("/api/tasks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) })
+    
+    // User cannot create tasks
+    if (userRole === "User" && !editTask) {
+      setFormError("You don't have permission to create tasks")
+      return
     }
-    await refreshTasks()
-    setSaving(false); setShowModal(false)
+    
+    // Admin must fill all required fields on create
+    if (userRole === "Admin" && !editTask) {
+      if (!form.title.trim() || !form.assignee.trim() || !form.due) {
+        setFormError("Please fill in all required fields")
+        return
+      }
+    }
+    
+    setSaving(true)
+    
+    try {
+      // For User editing: send only status
+      let body: any = form
+      if (userRole === "User" && editTask) {
+        body = { status: form.status }
+      }
+      
+      const res = editTask 
+        ? await fetch(`/api/tasks/${editTask.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+        : await fetch("/api/tasks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) })
+      
+      if (!res.ok) {
+        const error = await res.json()
+        setFormError(error.error || "Failed to save task")
+        setSaving(false)
+        return
+      }
+
+      await refreshTasks()
+      setSaving(false)
+      setShowModal(false)
+    } catch (err) {
+      setFormError("Failed to save task")
+      setSaving(false)
+    }
   }
 
   // ── Delete ──────────────────────────────────────────────────────
   async function handleDelete(id: number) {
-    await fetch(`/api/tasks/${id}`, { method: "DELETE" })
-    await refreshTasks()
-    setDeleteId(null)
+    try {
+      const res = await fetch(`/api/tasks/${id}`, { method: "DELETE" })
+      if (!res.ok) {
+        const error = await res.json()
+        setError(error.error || "Failed to delete task")
+        return
+      }
+      await refreshTasks()
+      setDeleteId(null)
+    } catch (err) {
+      setError("Failed to delete task")
+    }
   }
 
   // ── Quick status ────────────────────────────────────────────────
   async function handleStatusChange(task: Task, newStatus: TaskStatus) {
-    await fetch(`/api/tasks/${task.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: newStatus }) })
-    await refreshTasks()
+    if (!canUserUpdateStatus(task)) {
+      setError("You don't have permission to update task status")
+      return
+    }
+    try {
+      const res = await fetch(`/api/tasks/${task.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: newStatus }) })
+      if (!res.ok) {
+        const error = await res.json()
+        setError(error.error || "Failed to update task")
+        return
+      }
+      await refreshTasks()
+    } catch (err) {
+      setError("Failed to update task")
+    }
   }
 
   const hasFilters = search || filterStatus !== "all" || filterPriority !== "all" || filterDue
@@ -125,6 +246,10 @@ export default function DashboardPage() {
     return pages
   }
 
+  // ── Role badge ──────────────────────────────────────────────────
+  const roleBadgeColor = userRole === "Admin" ? "#7c6af7" : "#f59e0b"
+  const roleBgColor = userRole === "Admin" ? "rgba(124,106,247,0.1)" : "rgba(245,158,11,0.1)"
+
   return (
     <div style={s.page}>
       <div style={s.bgGrid} />
@@ -139,31 +264,69 @@ export default function DashboardPage() {
             </div>
             {formError && <div style={s.formError}>{formError}</div>}
             <form onSubmit={handleSave} style={s.modalForm}>
-              <div style={s.fieldGroup}>
-                <label style={s.label}>Title *</label>
-                <input required value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Fix login bug" style={s.input}
-                  onFocus={(e) => (e.target.style.borderColor = "#7c6af7")} onBlur={(e) => (e.target.style.borderColor = "rgba(255,255,255,0.1)")} />
-              </div>
-              <div style={s.fieldGroup}>
-                <label style={s.label}>Description</label>
-                <textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="What needs to be done?" rows={3}
-                  style={{ ...s.input, resize: "vertical", minHeight: "80px" }}
-                  onFocus={(e) => (e.target.style.borderColor = "#7c6af7")} onBlur={(e) => (e.target.style.borderColor = "rgba(255,255,255,0.1)")} />
-              </div>
-              <div style={s.fieldGroup}>
-                <label style={s.label}>Assignee *</label>
-                <input required value={form.assignee} onChange={(e) => setForm({ ...form, assignee: e.target.value })} placeholder="e.g. Ahmed" style={s.input}
-                  onFocus={(e) => (e.target.style.borderColor = "#7c6af7")} onBlur={(e) => (e.target.style.borderColor = "rgba(255,255,255,0.1)")} />
-              </div>
-              <div style={s.row2}>
-                <div style={s.fieldGroup}>
-                  <label style={s.label}>Priority</label>
-                  <select value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value as TaskPriority })} style={s.select}>
-                    <option value="high">High</option>
-                    <option value="medium">Medium</option>
-                    <option value="low">Low</option>
-                  </select>
-                </div>
+              {/* Admin can see and edit all fields */}
+              {userRole === "Admin" && (
+                <>
+                  {/* Title */}
+                  <div style={s.fieldGroup}>
+                    <label style={s.label}>Title *</label>
+                    <input required value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Fix login bug" style={s.input}
+                      onFocus={(e) => (e.target.style.borderColor = "#7c6af7")} onBlur={(e) => (e.target.style.borderColor = "rgba(255,255,255,0.1)")} />
+                  </div>
+
+                  {/* Description */}
+                  <div style={s.fieldGroup}>
+                    <label style={s.label}>Description</label>
+                    <textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="What needs to be done?" rows={3}
+                      style={{ ...s.input, resize: "vertical", minHeight: "80px" }}
+                      onFocus={(e) => (e.target.style.borderColor = "#7c6af7")} onBlur={(e) => (e.target.style.borderColor = "rgba(255,255,255,0.1)")} />
+                  </div>
+
+                  {/* Assignee */}
+                  <div style={s.fieldGroup}>
+                    <label style={s.label}>Assignee *</label>
+                    <select required value={form.assignee} onChange={(e) => setForm({ ...form, assignee: e.target.value })} style={s.select}>
+                      <option value="">Select user...</option>
+                      {AVAILABLE_USERS.map((user) => (
+                        <option key={user.email} value={user.name}>{user.name} - {user.email}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Priority */}
+                  <div style={s.row2}>
+                    <div style={s.fieldGroup}>
+                      <label style={s.label}>Priority</label>
+                      <select value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value as TaskPriority })} style={s.select}>
+                        <option value="high">High</option>
+                        <option value="medium">Medium</option>
+                        <option value="low">Low</option>
+                      </select>
+                    </div>
+
+                    {/* Status */}
+                    <div style={s.fieldGroup}>
+                      <label style={s.label}>Status</label>
+                      <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value as TaskStatus })} style={s.select}>
+                        <option value="pending">Pending</option>
+                        <option value="in-progress">In Progress</option>
+                        <option value="completed">Completed</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Due Date */}
+                  <div style={s.fieldGroup}>
+                    <label style={s.label}>Due Date *</label>
+                    <input required type="date" value={form.due} onChange={(e) => setForm({ ...form, due: e.target.value })}
+                      style={{ ...s.input, colorScheme: "dark" }}
+                      onFocus={(e) => (e.target.style.borderColor = "#7c6af7")} onBlur={(e) => (e.target.style.borderColor = "rgba(255,255,255,0.1)")} />
+                  </div>
+                </>
+              )}
+
+              {/* User can only update Status */}
+              {userRole === "User" && editTask && (
                 <div style={s.fieldGroup}>
                   <label style={s.label}>Status</label>
                   <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value as TaskStatus })} style={s.select}>
@@ -172,18 +335,20 @@ export default function DashboardPage() {
                     <option value="completed">Completed</option>
                   </select>
                 </div>
-              </div>
-              <div style={s.fieldGroup}>
-                <label style={s.label}>Due Date *</label>
-                <input required type="date" value={form.due} onChange={(e) => setForm({ ...form, due: e.target.value })}
-                  style={{ ...s.input, colorScheme: "dark" }}
-                  onFocus={(e) => (e.target.style.borderColor = "#7c6af7")} onBlur={(e) => (e.target.style.borderColor = "rgba(255,255,255,0.1)")} />
-              </div>
+              )}
+
+              {/* User cannot create tasks */}
+              {userRole === "User" && !editTask && (
+                <div style={s.formError}>Users cannot create tasks. Only admins can create tasks.</div>
+              )}
+
               <div style={s.modalActions}>
                 <button type="button" onClick={() => setShowModal(false)} style={s.cancelBtn}>Cancel</button>
-                <button type="submit" disabled={saving} style={{ ...s.submitBtn, opacity: saving ? 0.7 : 1 }}>
-                  {saving ? "Saving..." : editTask ? "Save Changes" : "Add Task"}
-                </button>
+                {(userRole === "Admin" || (userRole === "User" && editTask)) && (
+                  <button type="submit" disabled={saving} style={{ ...s.submitBtn, opacity: saving ? 0.7 : 1 }}>
+                    {saving ? "Saving..." : editTask ? "Save Changes" : "Add Task"}
+                  </button>
+                )}
               </div>
             </form>
           </div>
@@ -215,10 +380,21 @@ export default function DashboardPage() {
             <div style={s.avatar}>{session?.user?.name?.[0] ?? "U"}</div>
             <div>
               <div style={s.userName}>{session?.user?.name}</div>
-              <div style={s.userRole}>{session?.user?.role}</div>
+              <div style={{ ...s.userRole, color: roleBadgeColor }}>
+                <span style={{ display: "inline-block", padding: "2px 8px", borderRadius: "4px", background: roleBgColor, fontSize: "10px", fontWeight: 600 }}>
+                  {userRole}
+                </span>
+              </div>
             </div>
           </div>
-          <button onClick={() => signOut({ callbackUrl: "/login" })} style={s.logoutBtn}
+          {userRole === "Admin" && (
+            <Link href="/activity" style={{ color: "rgba(255,255,255,0.7)", textDecoration: "none", padding: "8px 12px", borderRadius: "6px", fontSize: "14px", cursor: "pointer", transition: "all 0.3s" }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = "rgba(255,255,255,1)"; (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.1)" }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = "rgba(255,255,255,0.7)"; (e.currentTarget as HTMLElement).style.background = "transparent" }}>
+              📋 Activity
+            </Link>
+          )}
+          <button onClick={() => signOut({ redirect: true })} style={s.logoutBtn}
             onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(239,68,68,0.15)" }}
             onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.05)" }}>
             Sign out
@@ -231,14 +407,18 @@ export default function DashboardPage() {
         <div style={s.pageHeader}>
           <div>
             <h1 style={s.pageTitle}>Dashboard</h1>
-            <p style={s.pageSubtitle}>Track your team&apos;s progress at a glance</p>
+            <p style={s.pageSubtitle}>{userRole === "Admin" ? "Manage all team tasks and assignments" : "View your assigned tasks"}</p>
           </div>
-          <button style={s.newTaskBtn} onClick={openCreate}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.transform = "translateY(-2px)" }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.transform = "translateY(0)" }}>
-            + New Task
-          </button>
+          {permissions.createTask && (
+            <button style={s.newTaskBtn} onClick={openCreate}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.transform = "translateY(-2px)" }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.transform = "translateY(0)" }}>
+              + New Task
+            </button>
+          )}
         </div>
+
+        {error && <div style={s.errorBanner}>{error}</div>}
 
         {loading ? (
           <div style={s.loadingState}><div style={s.spinner} /><p style={s.loadingText}>Loading your tasks...</p></div>
@@ -326,7 +506,7 @@ export default function DashboardPage() {
               )}
             </div>
 
-            {/* ── TASK TABLE ──────────────────────────────────── */}
+            {/* ── TASKS ──────────────────────────────────── */}
             <div style={s.tableCard}>
               <div style={s.tableHeader}>
                 <h3 style={s.chartTitle}>
@@ -341,7 +521,74 @@ export default function DashboardPage() {
                 <div style={s.emptyState}>
                   <div style={s.emptyIcon}>🔍</div>
                   <h3 style={s.emptyTitle}>No tasks found</h3>
-                  <p style={s.emptyText}>Try adjusting your search or filters.</p>
+                  <p style={s.emptyText}>{userRole === "Admin" ? "Try adjusting your search or create a new task." : "No tasks are assigned to you yet."}</p>
+                </div>
+              ) : userRole === "Admin" && groupedTasks ? (
+                // Admin view: grouped by assignee
+                <div style={s.groupedTasks}>
+                  {Object.entries(groupedTasks).map(([assignee, assigneeTasks]) => (
+                    <div key={assignee} style={s.assigneeGroup}>
+                      <h4 style={s.assigneeHeader}>
+                        {assignee}
+                        <span style={{ fontSize: "12px", fontWeight: 400, color: "rgba(255,255,255,0.5)", marginLeft: "8px" }}>
+                          ({assigneeTasks.length} task{assigneeTasks.length !== 1 ? "s" : ""})
+                        </span>
+                      </h4>
+                      <div style={s.tableWrap}>
+                        <table style={s.table}>
+                          <thead>
+                            <tr>
+                              {["Title", "Description", "Assignee", "Priority", "Due Date", "Status", "Actions"].map((h) => (
+                                <th key={h} style={{ ...s.th, ...(h === "Assignee" ? { color: "#a78bfa", fontWeight: 700 } : {}) }}>{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {assigneeTasks.map((task, i) => (
+                              <tr key={task.id} style={{ ...s.tr, background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.015)" }}>
+                                <td style={{ ...s.td, fontWeight: 500, maxWidth: "160px" }}>{task.title}</td>
+                                <td style={{ ...s.td, color: "rgba(255,255,255,0.45)", maxWidth: "180px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {task.description || "—"}
+                                </td>
+                                <td style={{ ...s.td, fontWeight: 600, background: "rgba(124,106,247,0.08)", borderRadius: "6px", color: "#a78bfa" }}>{task.assignee}</td>
+                                <td style={s.td}>
+                                  <span style={{ ...s.badge, color: PRIORITY_COLOR[task.priority], background: `${PRIORITY_COLOR[task.priority]}18`, border: `1px solid ${PRIORITY_COLOR[task.priority]}33` }}>
+                                    {task.priority}
+                                  </span>
+                                </td>
+                                <td style={{ ...s.td, color: "rgba(255,255,255,0.5)" }}>{task.due}</td>
+                                <td style={s.td}>
+                                  <select value={task.status} onChange={(e) => handleStatusChange(task, e.target.value as TaskStatus)} disabled={!canUserUpdateStatus(task)}
+                                    style={{ ...s.statusSelect, color: STATUS_COLOR[task.status], borderColor: `${STATUS_COLOR[task.status]}44`, background: `${STATUS_COLOR[task.status]}10`, opacity: !canUserUpdateStatus(task) ? 0.5 : 1, cursor: !canUserUpdateStatus(task) ? "not-allowed" : "pointer" }}>
+                                    <option value="pending">Pending</option>
+                                    <option value="in-progress">In Progress</option>
+                                    <option value="completed">Completed</option>
+                                  </select>
+                                </td>
+                                <td style={s.td}>
+                                  <div style={{ display: "flex", gap: "8px" }}>
+                                    {canUserEditTask(task) && (
+                                      <button onClick={() => openEdit(task)} style={s.editBtn}
+                                        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(124,106,247,0.2)" }}
+                                        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(124,106,247,0.08)" }}>Edit</button>
+                                    )}
+                                    {canUserDeleteTask(task) && (
+                                      <button onClick={() => setDeleteId(task.id)} style={s.deleteBtn}
+                                        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(239,68,68,0.2)" }}
+                                        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(239,68,68,0.08)" }}>Delete</button>
+                                    )}
+                                    {!canUserEditTask(task) && !canUserDeleteTask(task) && (
+                                      <span style={{ fontSize: "12px", color: "rgba(255,255,255,0.3)" }}>Read only</span>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               ) : (
                 <>
@@ -369,8 +616,8 @@ export default function DashboardPage() {
                             </td>
                             <td style={{ ...s.td, color: "rgba(255,255,255,0.5)" }}>{task.due}</td>
                             <td style={s.td}>
-                              <select value={task.status} onChange={(e) => handleStatusChange(task, e.target.value as TaskStatus)}
-                                style={{ ...s.statusSelect, color: STATUS_COLOR[task.status], borderColor: `${STATUS_COLOR[task.status]}44`, background: `${STATUS_COLOR[task.status]}10` }}>
+                              <select value={task.status} onChange={(e) => handleStatusChange(task, e.target.value as TaskStatus)} disabled={!canUserUpdateStatus(task)}
+                                style={{ ...s.statusSelect, color: STATUS_COLOR[task.status], borderColor: `${STATUS_COLOR[task.status]}44`, background: `${STATUS_COLOR[task.status]}10`, opacity: !canUserUpdateStatus(task) ? 0.5 : 1, cursor: !canUserUpdateStatus(task) ? "not-allowed" : "pointer" }}>
                                 <option value="pending">Pending</option>
                                 <option value="in-progress">In Progress</option>
                                 <option value="completed">Completed</option>
@@ -378,12 +625,19 @@ export default function DashboardPage() {
                             </td>
                             <td style={s.td}>
                               <div style={{ display: "flex", gap: "8px" }}>
-                                <button onClick={() => openEdit(task)} style={s.editBtn}
-                                  onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(124,106,247,0.2)" }}
-                                  onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(124,106,247,0.08)" }}>Edit</button>
-                                <button onClick={() => setDeleteId(task.id)} style={s.deleteBtn}
-                                  onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(239,68,68,0.2)" }}
-                                  onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(239,68,68,0.08)" }}>Delete</button>
+                                {canUserEditTask(task) && (
+                                  <button onClick={() => openEdit(task)} style={s.editBtn}
+                                    onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(124,106,247,0.2)" }}
+                                    onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(124,106,247,0.08)" }}>Edit</button>
+                                )}
+                                {canUserDeleteTask(task) && (
+                                  <button onClick={() => setDeleteId(task.id)} style={s.deleteBtn}
+                                    onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(239,68,68,0.2)" }}
+                                    onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(239,68,68,0.08)" }}>Delete</button>
+                                )}
+                                {!canUserEditTask(task) && !canUserDeleteTask(task) && (
+                                  <span style={{ fontSize: "12px", color: "rgba(255,255,255,0.3)" }}>Read only</span>
+                                )}
                               </div>
                             </td>
                           </tr>
@@ -465,6 +719,7 @@ const s: Record<string, CSSProperties> = {
   userName: { fontSize: "13px", fontWeight: 500, lineHeight: "1.2" },
   userRole: { fontSize: "11px", color: "rgba(255,255,255,0.4)", lineHeight: "1.2" },
   logoutBtn: { background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "8px", color: "rgba(255,255,255,0.6)", padding: "8px 14px", fontSize: "13px", cursor: "pointer", transition: "background 0.2s", fontFamily: "'DM Sans', sans-serif" },
+  errorBanner: { background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: "12px", padding: "12px 16px", color: "#f87171", fontSize: "13px", marginBottom: "16px" },
   main: { maxWidth: "1300px", margin: "0 auto", padding: "40px 32px" },
   pageHeader: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: "36px", flexWrap: "wrap", gap: "16px" },
   pageTitle: { fontFamily: "'Syne', sans-serif", fontSize: "32px", fontWeight: 800, margin: "0 0 4px", letterSpacing: "-0.02em" },
@@ -515,4 +770,8 @@ const s: Record<string, CSSProperties> = {
   pageBtn: { background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "8px", color: "rgba(255,255,255,0.6)", padding: "7px 12px", fontSize: "13px", cursor: "pointer", fontFamily: "'DM Sans', sans-serif", transition: "background 0.15s, color 0.15s" },
   pageBtnActive: { background: "rgba(124,106,247,0.2)", border: "1px solid rgba(124,106,247,0.4)", color: "#a78bfa", fontWeight: 600 },
   pageDots: { color: "rgba(255,255,255,0.3)", padding: "0 4px", fontSize: "13px" },
+  // Grouped tasks for admin
+  groupedTasks: { padding: "0 28px 28px" },
+  assigneeGroup: { marginBottom: "32px" },
+  assigneeHeader: { fontFamily: "'Syne', sans-serif", fontSize: "18px", fontWeight: 700, marginBottom: "16px", color: "#7c6af7" },
 }

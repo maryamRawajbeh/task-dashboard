@@ -40,7 +40,7 @@ export default function LoginPage() {
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              placeholder="admin@taskflow.com"
+              placeholder="admin@example.com"
               required
               style={styles.input}
               onFocus={(e) => (e.target.style.borderColor = "#7c6af7")}
@@ -72,8 +72,9 @@ export default function LoginPage() {
         </form>
         <div style={styles.demoHint}>
           <p style={styles.demoTitle}>Demo credentials</p>
-          <p style={styles.demoLine}>admin@taskflow.com / admin123</p>
-          <p style={styles.demoLine}>sara@taskflow.com / sara123</p>
+          <p style={styles.demoLine}>admin@example.com / admin123</p>
+          <p style={styles.demoLine}>ahmed@example.com / ahmed123</p>
+          <p style={styles.demoLine}>sara@example.com / sara123</p>
         </div>
       </div>
     </div>
