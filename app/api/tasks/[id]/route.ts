@@ -3,8 +3,9 @@ import { getTaskById, updateTask, deleteTask } from "@/lib/taskStore"
 import { Task } from "@/types"
 import { getSessionWithRole, createForbiddenResponse } from "@/lib/apiAuth"
 import { canEditTask, canDeleteTask, canUpdateTaskStatus } from "@/lib/rbac"
-import { getUserByName } from "@/lib/users"
+import { getUserByName, getUserByEmail } from "@/lib/users"
 import { logTaskDeletion, logStatusChange, logTaskAssignment, logTaskUpdate } from "@/lib/activityLogger"
+import { notifyTaskStatusChanged, notifyTaskAssignment as notifyAssignment, notifyTaskDeleted } from "@/lib/notificationLogger"
 
 // PUT /api/tasks/:id — update a task (with permission checks)
 export async function PUT(
@@ -71,9 +72,35 @@ export async function PUT(
     // Log changes
     if (changes.status) {
       logStatusChange(id, task.title, session.userEmail, session.userName || "Unknown", changes.status.old, changes.status.new)
+      
+      // Notify the assignee of status change
+      notifyTaskStatusChanged(
+        id,
+        task.title,
+        task.assigneeEmail,
+        task.assignee,
+        session.userEmail,
+        session.userName || "Unknown",
+        changes.status.old,
+        changes.status.new
+      )
     }
     if (changes.assignee) {
       logTaskAssignment(id, task.title, session.userEmail, session.userName || "Unknown", changes.assignee.old, changes.assignee.new)
+      
+      // Notify the new assignee
+      const newAssigneeUser = getUserByName(changes.assignee.new)
+      if (newAssigneeUser) {
+        notifyAssignment(
+          id,
+          task.title,
+          newAssigneeUser.email,
+          newAssigneeUser.name,
+          session.userEmail,
+          session.userName || "Unknown",
+          changes.assignee.old
+        )
+      }
     }
     if (changes.title) {
       logTaskUpdate(id, task.title, session.userEmail, session.userName || "Unknown", "title", changes.title.old, changes.title.new)
@@ -119,6 +146,16 @@ export async function DELETE(
 
     // Log the deletion before deleting
     logTaskDeletion(id, task.title, session.userEmail, session.userName || "Unknown")
+    
+    // Notify the assignee of task deletion
+    notifyTaskDeleted(
+      id,
+      task.title,
+      task.assigneeEmail,
+      task.assignee,
+      session.userEmail,
+      session.userName || "Unknown"
+    )
 
     const deleted = deleteTask(id)
     if (!deleted) return NextResponse.json({ error: "Task not found" }, { status: 404 })

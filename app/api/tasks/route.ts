@@ -5,6 +5,7 @@ import { getSessionWithRole, createForbiddenResponse } from "@/lib/apiAuth"
 import { canViewTask, canCreateTask } from "@/lib/rbac"
 import { getUserByName } from "@/lib/users"
 import { logTaskCreation } from "@/lib/activityLogger"
+import { notifyTaskCreated } from "@/lib/notificationLogger"
 
 // GET /api/tasks — return tasks based on user role
 export async function GET(): Promise<NextResponse<Task[] | { error: string }>> {
@@ -65,6 +66,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<Task | { erro
     
     // Log the task creation
     logTaskCreation(task.id, task.title, session.userEmail, session.userName || "Unknown")
+    
+    // Notify the assignee (including self-assigned tasks)
+    notifyTaskCreated(
+      task.id,
+      task.title,
+      assigneeUser.email,
+      assigneeUser.name,
+      session.userEmail,
+      session.userName || "Unknown"
+    )
     
     return NextResponse.json(task, { status: 201 })
   } catch {

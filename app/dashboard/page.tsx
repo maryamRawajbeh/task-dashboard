@@ -1,22 +1,44 @@
 "use client"
-import { useEffect, useState, CSSProperties, FormEvent } from "react"
+import { useState, CSSProperties, FormEvent } from "react"
 import { useSession, signOut } from "next-auth/react"
 import Link from "next/link"
+import useSWR from "swr"
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from "recharts"
 import { Task, TaskStats, TaskStatus, TaskPriority, UserRole, ROLE_PERMISSIONS } from "@/types"
 import { canEditTask, canDeleteTask, canUpdateTaskStatus } from "@/lib/rbac"
 import { AVAILABLE_USERS } from "@/lib/users"
+import { NotificationCenter } from "@/app/components/NotificationCenter"
+import { NotificationBell } from "@/app/components/NotificationBell"
+import { ToastContainer, useToasts } from "@/app/components/Toast"
+import { useNotifications } from "@/app/components/useNotifications"
 
 const STATUS_COLOR: Record<string, string> = { completed: "#22c55e", pending: "#f59e0b", "in-progress": "#38bdf8" }
 const PRIORITY_COLOR: Record<string, string> = { high: "#ef4444", medium: "#f59e0b", low: "#22c55e" }
 const EMPTY_FORM = { title: "", description: "", assignee: "", priority: "medium" as TaskPriority, due: "", status: "pending" as TaskStatus }
 const PAGE_SIZE = 5
 
+// SWR fetcher
+const fetcher = (url: string) => fetch(url).then((r) => r.json())
+
 export default function DashboardPage() {
   const { data: session } = useSession()
-  const [tasks, setTasks] = useState<Task[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState("")
+
+  // ── SWR — replaces useState + useEffect + manual fetch ──────────
+  const { data: tasksData, error: swrError, isLoading: loading, mutate } = useSWR<Task[]>(
+    "/api/tasks",
+    fetcher,
+    {
+      revalidateOnFocus: true,      // يحدّث لما المستخدم يرجع للتاب
+      revalidateOnReconnect: true,  // يحدّث لما يرجع الإنترنت
+      dedupingInterval: 5000,       // ما يكرر الطلب إذا صار قبل 5 ثواني
+    }
+  )
+  const tasks: Task[] = Array.isArray(tasksData) ? tasksData : []
+  const error = swrError?.message || (!Array.isArray(tasksData) && tasksData ? (tasksData as any).error : "") || ""
+
+  // Notification state
+  const { isOpen, setIsOpen, unreadCount, refreshUnreadCount } = useNotifications()
+  const { toasts, success, error: errorToast, removeToast } = useToasts()
 
   // Modal
   const [showModal, setShowModal] = useState(false)
@@ -40,20 +62,6 @@ export default function DashboardPage() {
   const userRole = (session?.user?.role as UserRole) || "User"
   const permissions = ROLE_PERMISSIONS[userRole]
 
-  useEffect(() => {
-    fetch("/api/tasks")
-      .then((r) => r.json())
-      .then((data) => {
-        if (Array.isArray(data)) {
-          setTasks(data)
-          setLoading(false)
-        } else if (data.error) {
-          setError(data.error)
-          setLoading(false)
-        }
-      })
-  }, [])
-
   // ── Can user edit/delete task? ───────────────────────────────
   function canUserEditTask(task: Task): boolean {
     return canEditTask(userRole, task.createdBy, session?.user?.email || "", task.assigneeEmail)
@@ -65,10 +73,7 @@ export default function DashboardPage() {
 
   function canUserUpdateStatus(task: Task): boolean {
     const allowed = canUpdateTaskStatus(userRole)
-    // User can only update status if they're the assignee
-    if (userRole === "User" && task.assigneeEmail !== session?.user?.email) {
-      return false
-    }
+    if (userRole === "User" && task.assigneeEmail !== session?.user?.email) return false
     return allowed
   }
 
@@ -94,7 +99,7 @@ export default function DashboardPage() {
   const paginated = userRole === "Admin" ? filtered : filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE)
 
   // reset to page 1 when filters change
-  useEffect(() => { setPage(1) }, [search, filterStatus, filterPriority, filterDue])
+  useState(() => { setPage(1) })
 
   // ── Stats ───────────────────────────────────────────────────────
   const stats: TaskStats = {
@@ -116,123 +121,114 @@ export default function DashboardPage() {
   ]
 
   // ── Modal helpers ───────────────────────────────────────────────
-  function openCreate() { 
-    if (!permissions.createTask) {
-      setFormError("You don't have permission to create tasks")
-      return
-    }
-    setEditTask(null)
-    setForm(EMPTY_FORM)
-    setFormError("")
-    setShowModal(true)
+  function openCreate() {
+    if (!permissions.createTask) { setFormError("You don't have permission to create tasks"); return }
+    setEditTask(null); setForm(EMPTY_FORM); setFormError(""); setShowModal(true)
   }
 
-  function openEdit(task: Task) { 
-    // User can only edit status of their assigned tasks
+  function openEdit(task: Task) {
     if (userRole === "User") {
-      if (task.assigneeEmail !== session?.user?.email) {
-        setFormError("You can only edit your assigned tasks")
-        return
-      }
-    } else if (!canUserEditTask(task)) {
-      // Admin can edit any task
-      setFormError("You don't have permission to edit this task")
-      return
-    }
+      if (task.assigneeEmail !== session?.user?.email) { setFormError("You can only edit your assigned tasks"); return }
+    } else if (!canUserEditTask(task)) { setFormError("You don't have permission to edit this task"); return }
     setEditTask(task)
     setForm({ title: task.title, description: task.description, assignee: task.assignee, priority: task.priority, due: task.due, status: task.status })
-    setFormError("")
-    setShowModal(true)
+    setFormError(""); setShowModal(true)
   }
 
-  // ── Save ────────────────────────────────────────────────────────
+  // ── refreshTasks — now uses SWR mutate ──────────────────────────
   async function refreshTasks() {
-    const res = await fetch("/api/tasks")
-    const data: Task[] = await res.json()
-    setTasks(data)
+    await mutate()         // SWR يعيد جلب البيانات ويحدّث كل مكان تلقائياً
+    refreshUnreadCount()
   }
+// ── Save ────────────────────────────────────────────────────────
+async function handleSave(e: FormEvent<HTMLFormElement>) {
+  e.preventDefault()
+  if (userRole === "User" && !editTask) { setFormError("You don't have permission to create tasks"); return }
+  if (userRole === "Admin" && !editTask) {
+    if (!form.title.trim() || !form.assignee.trim() || !form.due) { setFormError("Please fill in all required fields"); return }
+  }
+  setSaving(true)
+  try {
+    let body: any = form
+    if (userRole === "User" && editTask) body = { status: form.status }
 
-  async function handleSave(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault()
-    
-    // User cannot create tasks
-    if (userRole === "User" && !editTask) {
-      setFormError("You don't have permission to create tasks")
-      return
-    }
-    
-    // Admin must fill all required fields on create
-    if (userRole === "Admin" && !editTask) {
-      if (!form.title.trim() || !form.assignee.trim() || !form.due) {
-        setFormError("Please fill in all required fields")
-        return
-      }
-    }
-    
-    setSaving(true)
-    
-    try {
-      // For User editing: send only status
-      let body: any = form
-      if (userRole === "User" && editTask) {
-        body = { status: form.status }
-      }
-      
-      const res = editTask 
-        ? await fetch(`/api/tasks/${editTask.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
-        : await fetch("/api/tasks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) })
-      
+    if (editTask) {
+      // Optimistic update — حدّث الواجهة فوراً قبل ما يرد الـ API
+      await mutate(
+        tasks.map((t) => t.id === editTask.id ? { ...t, ...body } : t),
+        false  // false = ما تعيد الـ fetch من الـ API هلق
+      )
+      const res = await fetch(`/api/tasks/${editTask.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
       if (!res.ok) {
-        const error = await res.json()
-        setFormError(error.error || "Failed to save task")
-        setSaving(false)
-        return
+        const err = await res.json()
+        await mutate()  // إذا صار خطأ، رجّع البيانات الحقيقية
+        setFormError(err.error || "Failed to save task")
+        errorToast(err.error || "Failed to save task")
+        setSaving(false); return
       }
-
-      await refreshTasks()
-      setSaving(false)
-      setShowModal(false)
-    } catch (err) {
-      setFormError("Failed to save task")
-      setSaving(false)
-    }
-  }
-
-  // ── Delete ──────────────────────────────────────────────────────
-  async function handleDelete(id: number) {
-    try {
-      const res = await fetch(`/api/tasks/${id}`, { method: "DELETE" })
+    } else {
+      const res = await fetch("/api/tasks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) })
       if (!res.ok) {
-        const error = await res.json()
-        setError(error.error || "Failed to delete task")
-        return
+        const err = await res.json()
+        setFormError(err.error || "Failed to save task")
+        errorToast(err.error || "Failed to save task")
+        setSaving(false); return
       }
-      await refreshTasks()
-      setDeleteId(null)
-    } catch (err) {
-      setError("Failed to delete task")
     }
-  }
 
-  // ── Quick status ────────────────────────────────────────────────
-  async function handleStatusChange(task: Task, newStatus: TaskStatus) {
-    if (!canUserUpdateStatus(task)) {
-      setError("You don't have permission to update task status")
-      return
-    }
-    try {
-      const res = await fetch(`/api/tasks/${task.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: newStatus }) })
-      if (!res.ok) {
-        const error = await res.json()
-        setError(error.error || "Failed to update task")
-        return
-      }
-      await refreshTasks()
-    } catch (err) {
-      setError("Failed to update task")
-    }
+    await mutate()  // زامن مع الـ API بعد ما خلص
+    success(editTask ? "Task updated!" : "Task created!")
+    setSaving(false); setShowModal(false)
+  } catch {
+    await mutate()  // إذا صار خطأ، رجّع البيانات الحقيقية
+    setFormError("Failed to save task"); setSaving(false)
   }
+}
 
+// ── Delete ──────────────────────────────────────────────────────
+async function handleDelete(id: number) {
+  try {
+    // Optimistic update — شيل التاسك من الواجهة فوراً
+    await mutate(tasks.filter((t) => t.id !== id), false)
+    setDeleteId(null)
+    success("Task deleted!")
+
+    const res = await fetch(`/api/tasks/${id}`, { method: "DELETE" })
+    if (!res.ok) {
+      const err = await res.json()
+      await mutate()  // إذا صار خطأ، رجّع التاسك
+      errorToast(err.error || "Failed to delete task"); return
+    }
+    await mutate()  // زامن مع الـ API
+  } catch {
+    await mutate()  // إذا صار خطأ، رجّع البيانات الحقيقية
+    errorToast("Failed to delete task")
+  }
+}
+
+// ── Quick status ────────────────────────────────────────────────
+async function handleStatusChange(task: Task, newStatus: TaskStatus) {
+  if (!canUserUpdateStatus(task)) { errorToast("You don't have permission to update task status"); return }
+  try {
+    // Optimistic update — غيّر الـ status فوراً في الواجهة
+    await mutate(
+      tasks.map((t) => t.id === task.id ? { ...t, status: newStatus } : t),
+      false  // false = ما تعيد الـ fetch من الـ API هلق
+    )
+
+    const res = await fetch(`/api/tasks/${task.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: newStatus }) })
+    if (!res.ok) {
+      const err = await res.json()
+      await mutate()  // إذا صار خطأ، رجّع الـ status القديم
+      errorToast(err.error || "Failed to update task"); return
+    }
+    await mutate()  // زامن مع الـ API
+    success("Task status updated!")
+  } catch {
+    await mutate()  // إذا صار خطأ، رجّع البيانات الحقيقية
+    errorToast("Failed to update task")
+  }
+}
   const hasFilters = search || filterStatus !== "all" || filterPriority !== "all" || filterDue
 
   // ── Pagination controls ─────────────────────────────────────────
@@ -246,7 +242,6 @@ export default function DashboardPage() {
     return pages
   }
 
-  // ── Role badge ──────────────────────────────────────────────────
   const roleBadgeColor = userRole === "Admin" ? "#7c6af7" : "#f59e0b"
   const roleBgColor = userRole === "Admin" ? "rgba(124,106,247,0.1)" : "rgba(245,158,11,0.1)"
 
@@ -264,25 +259,19 @@ export default function DashboardPage() {
             </div>
             {formError && <div style={s.formError}>{formError}</div>}
             <form onSubmit={handleSave} style={s.modalForm}>
-              {/* Admin can see and edit all fields */}
               {userRole === "Admin" && (
                 <>
-                  {/* Title */}
                   <div style={s.fieldGroup}>
                     <label style={s.label}>Title *</label>
                     <input required value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Fix login bug" style={s.input}
                       onFocus={(e) => (e.target.style.borderColor = "#7c6af7")} onBlur={(e) => (e.target.style.borderColor = "rgba(255,255,255,0.1)")} />
                   </div>
-
-                  {/* Description */}
                   <div style={s.fieldGroup}>
                     <label style={s.label}>Description</label>
                     <textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="What needs to be done?" rows={3}
                       style={{ ...s.input, resize: "vertical", minHeight: "80px" }}
                       onFocus={(e) => (e.target.style.borderColor = "#7c6af7")} onBlur={(e) => (e.target.style.borderColor = "rgba(255,255,255,0.1)")} />
                   </div>
-
-                  {/* Assignee */}
                   <div style={s.fieldGroup}>
                     <label style={s.label}>Assignee *</label>
                     <select required value={form.assignee} onChange={(e) => setForm({ ...form, assignee: e.target.value })} style={s.select}>
@@ -292,8 +281,6 @@ export default function DashboardPage() {
                       ))}
                     </select>
                   </div>
-
-                  {/* Priority */}
                   <div style={s.row2}>
                     <div style={s.fieldGroup}>
                       <label style={s.label}>Priority</label>
@@ -303,8 +290,6 @@ export default function DashboardPage() {
                         <option value="low">Low</option>
                       </select>
                     </div>
-
-                    {/* Status */}
                     <div style={s.fieldGroup}>
                       <label style={s.label}>Status</label>
                       <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value as TaskStatus })} style={s.select}>
@@ -314,8 +299,6 @@ export default function DashboardPage() {
                       </select>
                     </div>
                   </div>
-
-                  {/* Due Date */}
                   <div style={s.fieldGroup}>
                     <label style={s.label}>Due Date *</label>
                     <input required type="date" value={form.due} onChange={(e) => setForm({ ...form, due: e.target.value })}
@@ -324,8 +307,6 @@ export default function DashboardPage() {
                   </div>
                 </>
               )}
-
-              {/* User can only update Status */}
               {userRole === "User" && editTask && (
                 <div style={s.fieldGroup}>
                   <label style={s.label}>Status</label>
@@ -336,12 +317,9 @@ export default function DashboardPage() {
                   </select>
                 </div>
               )}
-
-              {/* User cannot create tasks */}
               {userRole === "User" && !editTask && (
                 <div style={s.formError}>Users cannot create tasks. Only admins can create tasks.</div>
               )}
-
               <div style={s.modalActions}>
                 <button type="button" onClick={() => setShowModal(false)} style={s.cancelBtn}>Cancel</button>
                 {(userRole === "Admin" || (userRole === "User" && editTask)) && (
@@ -387,6 +365,7 @@ export default function DashboardPage() {
               </div>
             </div>
           </div>
+          <NotificationBell unreadCount={unreadCount} onClick={() => setIsOpen(true)} />
           {userRole === "Admin" && (
             <Link href="/activity" style={{ color: "rgba(255,255,255,0.7)", textDecoration: "none", padding: "8px 12px", borderRadius: "6px", fontSize: "14px", cursor: "pointer", transition: "all 0.3s" }}
               onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = "rgba(255,255,255,1)"; (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.1)" }}
@@ -403,7 +382,6 @@ export default function DashboardPage() {
       </nav>
 
       <main style={s.main}>
-        {/* ── PAGE HEADER ─────────────────────────────────────── */}
         <div style={s.pageHeader}>
           <div>
             <h1 style={s.pageTitle}>Dashboard</h1>
@@ -502,11 +480,11 @@ export default function DashboardPage() {
               </select>
               <input type="date" value={filterDue} onChange={(e) => setFilterDue(e.target.value)} style={{ ...s.filterSelect, colorScheme: "dark", minWidth: "150px" }} title="Due on or before" />
               {hasFilters && (
-                <button onClick={() => { setSearch(""); setFilterStatus("all"); setFilterPriority("all"); setFilterDue("") }} style={s.clearBtn}>Clear ✕</button>
+                <button onClick={() => { setSearch(""); setFilterStatus("all"); setFilterPriority("all"); setFilterDue(""); setPage(1) }} style={s.clearBtn}>Clear ✕</button>
               )}
             </div>
 
-            {/* ── TASKS ──────────────────────────────────── */}
+            {/* ── TASKS ───────────────────────────────────────── */}
             <div style={s.tableCard}>
               <div style={s.tableHeader}>
                 <h3 style={s.chartTitle}>
@@ -524,7 +502,6 @@ export default function DashboardPage() {
                   <p style={s.emptyText}>{userRole === "Admin" ? "Try adjusting your search or create a new task." : "No tasks are assigned to you yet."}</p>
                 </div>
               ) : userRole === "Admin" && groupedTasks ? (
-                // Admin view: grouped by assignee
                 <div style={s.groupedTasks}>
                   {Object.entries(groupedTasks).map(([assignee, assigneeTasks]) => (
                     <div key={assignee} style={s.assigneeGroup}>
@@ -547,14 +524,10 @@ export default function DashboardPage() {
                             {assigneeTasks.map((task, i) => (
                               <tr key={task.id} style={{ ...s.tr, background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.015)" }}>
                                 <td style={{ ...s.td, fontWeight: 500, maxWidth: "160px" }}>{task.title}</td>
-                                <td style={{ ...s.td, color: "rgba(255,255,255,0.45)", maxWidth: "180px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                  {task.description || "—"}
-                                </td>
+                                <td style={{ ...s.td, color: "rgba(255,255,255,0.45)", maxWidth: "180px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{task.description || "—"}</td>
                                 <td style={{ ...s.td, fontWeight: 600, background: "rgba(124,106,247,0.08)", borderRadius: "6px", color: "#a78bfa" }}>{task.assignee}</td>
                                 <td style={s.td}>
-                                  <span style={{ ...s.badge, color: PRIORITY_COLOR[task.priority], background: `${PRIORITY_COLOR[task.priority]}18`, border: `1px solid ${PRIORITY_COLOR[task.priority]}33` }}>
-                                    {task.priority}
-                                  </span>
+                                  <span style={{ ...s.badge, color: PRIORITY_COLOR[task.priority], background: `${PRIORITY_COLOR[task.priority]}18`, border: `1px solid ${PRIORITY_COLOR[task.priority]}33` }}>{task.priority}</span>
                                 </td>
                                 <td style={{ ...s.td, color: "rgba(255,255,255,0.5)" }}>{task.due}</td>
                                 <td style={s.td}>
@@ -605,14 +578,10 @@ export default function DashboardPage() {
                         {paginated.map((task, i) => (
                           <tr key={task.id} style={{ ...s.tr, background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.015)" }}>
                             <td style={{ ...s.td, fontWeight: 500, maxWidth: "160px" }}>{task.title}</td>
-                            <td style={{ ...s.td, color: "rgba(255,255,255,0.45)", maxWidth: "180px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              {task.description || "—"}
-                            </td>
+                            <td style={{ ...s.td, color: "rgba(255,255,255,0.45)", maxWidth: "180px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{task.description || "—"}</td>
                             <td style={s.td}>{task.assignee}</td>
                             <td style={s.td}>
-                              <span style={{ ...s.badge, color: PRIORITY_COLOR[task.priority], background: `${PRIORITY_COLOR[task.priority]}18`, border: `1px solid ${PRIORITY_COLOR[task.priority]}33` }}>
-                                {task.priority}
-                              </span>
+                              <span style={{ ...s.badge, color: PRIORITY_COLOR[task.priority], background: `${PRIORITY_COLOR[task.priority]}18`, border: `1px solid ${PRIORITY_COLOR[task.priority]}33` }}>{task.priority}</span>
                             </td>
                             <td style={{ ...s.td, color: "rgba(255,255,255,0.5)" }}>{task.due}</td>
                             <td style={s.td}>
@@ -653,23 +622,16 @@ export default function DashboardPage() {
                       <span style={{ color: "rgba(255,255,255,0.3)", marginLeft: "8px" }}>({filtered.length} tasks)</span>
                     </span>
                     <div style={s.pageControls}>
-                      {/* Previous */}
                       <button onClick={() => setPage((p) => p - 1)} disabled={safePage === 1}
                         style={{ ...s.pageBtn, opacity: safePage === 1 ? 0.3 : 1, cursor: safePage === 1 ? "not-allowed" : "pointer" }}>← Prev</button>
-
-                      {/* Page numbers */}
                       {pageNumbers().map((p, i) =>
                         p === "..." ? (
                           <span key={`dots-${i}`} style={s.pageDots}>…</span>
                         ) : (
                           <button key={p} onClick={() => setPage(p as number)}
-                            style={{ ...s.pageBtn, ...(safePage === p ? s.pageBtnActive : {}) }}>
-                            {p}
-                          </button>
+                            style={{ ...s.pageBtn, ...(safePage === p ? s.pageBtnActive : {}) }}>{p}</button>
                         )
                       )}
-
-                      {/* Next */}
                       <button onClick={() => setPage((p) => p + 1)} disabled={safePage === totalPages}
                         style={{ ...s.pageBtn, opacity: safePage === totalPages ? 0.3 : 1, cursor: safePage === totalPages ? "not-allowed" : "pointer" }}>Next →</button>
                     </div>
@@ -681,9 +643,14 @@ export default function DashboardPage() {
         )}
       </main>
 
+      <ToastContainer toasts={toasts} removeToast={removeToast} />
+      <NotificationCenter isOpen={isOpen} onClose={() => setIsOpen(false)} />
+
       <style>{`
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes fadeIn { from { opacity:0; transform:scale(0.96); } to { opacity:1; transform:scale(1); } }
+        @keyframes slideIn { from { transform: translateX(400px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+        @keyframes slideOut { from { transform: translateX(0); opacity: 1; } to { transform: translateX(400px); opacity: 0; } }
         * { box-sizing: border-box; }
         option { background: #1a1a2e; color: #fff; }
       `}</style>
@@ -717,7 +684,7 @@ const s: Record<string, CSSProperties> = {
   userChip: { display: "flex", alignItems: "center", gap: "10px" },
   avatar: { width: "34px", height: "34px", borderRadius: "50%", background: "linear-gradient(135deg,#7c6af7,#5b4fe0)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Syne', sans-serif", fontWeight: 700, fontSize: "14px" },
   userName: { fontSize: "13px", fontWeight: 500, lineHeight: "1.2" },
-  userRole: { fontSize: "11px", color: "rgba(255,255,255,0.4)", lineHeight: "1.2" },
+  userRole: { fontSize: "11px", lineHeight: "1.2" },
   logoutBtn: { background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "8px", color: "rgba(255,255,255,0.6)", padding: "8px 14px", fontSize: "13px", cursor: "pointer", transition: "background 0.2s", fontFamily: "'DM Sans', sans-serif" },
   errorBanner: { background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: "12px", padding: "12px 16px", color: "#f87171", fontSize: "13px", marginBottom: "16px" },
   main: { maxWidth: "1300px", margin: "0 auto", padding: "40px 32px" },
@@ -756,21 +723,19 @@ const s: Record<string, CSSProperties> = {
   tr: { transition: "background 0.15s" },
   td: { padding: "14px 20px", fontSize: "13px", color: "rgba(255,255,255,0.8)", borderBottom: "1px solid rgba(255,255,255,0.04)" },
   badge: { display: "inline-block", padding: "4px 10px", borderRadius: "6px", fontSize: "11px", fontWeight: 600, letterSpacing: "0.04em", textTransform: "capitalize" },
-  statusSelect: { border: "1px solid", borderRadius: "8px", padding: "5px 10px", fontSize: "12px", fontWeight: 600, cursor: "pointer", outline: "none", fontFamily: "'DM Sans', sans-serif" },
+  statusSelect: { border: "1px solid", borderRadius: "8px", padding: "5px 10px", fontSize: "12px", fontWeight: 600, outline: "none", fontFamily: "'DM Sans', sans-serif" },
   editBtn: { background: "rgba(124,106,247,0.08)", border: "1px solid rgba(124,106,247,0.2)", borderRadius: "8px", color: "#a78bfa", padding: "6px 12px", fontSize: "12px", cursor: "pointer", transition: "background 0.15s", fontFamily: "'DM Sans', sans-serif" },
   deleteBtn: { background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: "8px", color: "#f87171", padding: "6px 12px", fontSize: "12px", cursor: "pointer", transition: "background 0.15s", fontFamily: "'DM Sans', sans-serif" },
   emptyState: { textAlign: "center", padding: "60px 0" },
   emptyIcon: { fontSize: "40px", marginBottom: "12px" },
   emptyTitle: { fontFamily: "'Syne', sans-serif", fontSize: "18px", fontWeight: 700, margin: "0 0 8px" },
   emptyText: { color: "rgba(255,255,255,0.4)", fontSize: "14px", margin: 0 },
-  // Pagination
   pagination: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "20px 28px", borderTop: "1px solid rgba(255,255,255,0.06)", flexWrap: "wrap", gap: "12px" },
   pageInfo: { color: "rgba(255,255,255,0.5)", fontSize: "13px" },
   pageControls: { display: "flex", alignItems: "center", gap: "6px" },
   pageBtn: { background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "8px", color: "rgba(255,255,255,0.6)", padding: "7px 12px", fontSize: "13px", cursor: "pointer", fontFamily: "'DM Sans', sans-serif", transition: "background 0.15s, color 0.15s" },
   pageBtnActive: { background: "rgba(124,106,247,0.2)", border: "1px solid rgba(124,106,247,0.4)", color: "#a78bfa", fontWeight: 600 },
   pageDots: { color: "rgba(255,255,255,0.3)", padding: "0 4px", fontSize: "13px" },
-  // Grouped tasks for admin
   groupedTasks: { padding: "0 28px 28px" },
   assigneeGroup: { marginBottom: "32px" },
   assigneeHeader: { fontFamily: "'Syne', sans-serif", fontSize: "18px", fontWeight: 700, marginBottom: "16px", color: "#7c6af7" },

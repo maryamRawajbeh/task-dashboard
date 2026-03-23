@@ -62,6 +62,24 @@ try {
     )
   `)
 
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS notifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id INTEGER NOT NULL,
+      task_title TEXT NOT NULL,
+      type TEXT NOT NULL,
+      recipient_email TEXT NOT NULL,
+      recipient_name TEXT NOT NULL,
+      trigger_user_email TEXT NOT NULL,
+      trigger_user_name TEXT NOT NULL,
+      message TEXT NOT NULL,
+      is_read INTEGER DEFAULT 0 NOT NULL,
+      timestamp INTEGER NOT NULL,
+      metadata TEXT,
+      created_at INTEGER DEFAULT ${Date.now()} NOT NULL
+    )
+  `)
+
   console.log("✓ Tables ready")
 
   // Check if data exists

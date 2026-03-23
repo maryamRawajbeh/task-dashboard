@@ -1,7 +1,7 @@
 import { db, sqlite } from "@/lib/db"
 import { tasks, activityLogs, users } from "@/lib/db/schema"
 import { Task, TaskStatus, TaskPriority } from "@/types"
-import { eq } from "drizzle-orm"
+import { eq, and, desc } from "drizzle-orm"
 import { getUserByEmail } from "@/lib/users"
 
 let dbInitialized = false
@@ -37,7 +37,9 @@ export function createTaskInDb(data: {
   createdBy: string
 }): Task | null {
   try {
-    const result = db
+    const createdAt = Date.now()
+    
+    db
       .insert(tasks)
       .values({
         title: data.title,
@@ -47,12 +49,27 @@ export function createTaskInDb(data: {
         dueDate: data.dueDate,
         assigneeEmail: data.assigneeEmail,
         createdBy: data.createdBy,
+        createdAt,
+        updatedAt: createdAt,
       })
       .run()
 
-    if (!result.lastInsertRowid) return null
+    // Get the last inserted task
+    const result = db
+      .select()
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.title, data.title),
+          eq(tasks.createdBy, data.createdBy),
+          eq(tasks.createdAt, createdAt)
+        )
+      )
+      .orderBy(desc(tasks.id))
+      .all()
+      .at(0)
 
-    return getTaskByIdFromDb(Number(result.lastInsertRowid))
+    return result ? dbTaskToTask(result) : null
   } catch (error) {
     console.error("Error creating task:", error)
     return null
